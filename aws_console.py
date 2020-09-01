@@ -32,14 +32,31 @@ def get_arguments(profile_names):
     return parser.parse_args()
 
 
-def get_signin_token(role_arn):
+def get_credentials(role_arn, mfa_serial):
     sts_client = boto3.client("sts")
 
-    assumed_role_object = sts_client.assume_role(
-        RoleArn=role_arn, RoleSessionName="AssumeRoleSession",
-    )
+    try:
+        assumed_role_object = sts_client.assume_role(
+            RoleArn=role_arn,
+            RoleSessionName="AssumeRoleSession",
+        )
+    except botocore.exceptions.ClientError as exception:
+        error_code = exception.response["Error"]["Code"]
+        if error_code != "AccessDenied" or not mfa_serial:
+            raise
 
-    credentials = assumed_role_object["Credentials"]
+        mfa_token = input(f"Enter MFA code for {mfa_serial}: ")
+        assumed_role_object = sts_client.assume_role(
+            RoleArn=role_arn,
+            RoleSessionName="AssumeRoleSession",
+            SerialNumber=mfa_serial,
+            TokenCode=mfa_token,
+        )
+
+    return assumed_role_object["Credentials"]
+
+
+def get_signin_token(credentials):
     session_string = json.dumps(
         {
             "sessionId": credentials["AccessKeyId"],
@@ -58,7 +75,7 @@ def get_signin_token(role_arn):
 
     request_url = "https://signin.aws.amazon.com/federation?" + query_string
     response = requests.get(request_url)
-    signin_token = json.loads(response.text)["SigninToken"]
+    signin_token = response.json()["SigninToken"]
 
     return signin_token
 
@@ -78,9 +95,13 @@ def get_signin_url(signin_token):
 def main():
     profiles = botocore.session.Session().full_config["profiles"]
     arguments = get_arguments(set(profiles.keys()) - {"default"})
-    role_arn = profiles[arguments.profile]["role_arn"]
 
-    signin_token = get_signin_token(role_arn)
+    profile = profiles[arguments.profile]
+    role_arn = profile["role_arn"]
+    mfa_serial = profile.get("mfa_serial", None)
+
+    credentials = get_credentials(role_arn, mfa_serial)
+    signin_token = get_signin_token(credentials)
     signin_url = get_signin_url(signin_token)
     webbrowser.open(signin_url)
 
